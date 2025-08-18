@@ -17,7 +17,7 @@ const {
 router.post("/recruiter-register", async (req, res) => {
   const client = await pool.connect();
   try {
-    const { name, email, password } = req.body; // password still needed for Auth0
+    const { name, email, password, role } = req.body; 
 
     if (!name || !email || !password) {
       return res.status(400).json({ error: "name, email, and password are required" });
@@ -36,11 +36,11 @@ router.post("/recruiter-register", async (req, res) => {
     await client.query("BEGIN");
 
     const insertSQL = `
-      INSERT INTO public.users (name, role, email)
-      VALUES ($1, $2, $3)
+      INSERT INTO public.users (name, role, email, manager_id)
+      VALUES ($1, $2, $3, $4)
       RETURNING userid
     `;
-    const { rows } = await client.query(insertSQL, [name, "recruiter", email]);
+    const { rows } = await client.query(insertSQL, [name, role, email, "2"]);
 
     await client.query("COMMIT");
 
@@ -66,28 +66,56 @@ router.post("/recruiter-register", async (req, res) => {
 });
 
 router.post("/candidate-register", async (req, res) => {
+  const client = await pool.connect();
   try {
-    const { email, password, name, phone } = req.body;
+    const { name, email, password } = req.body;
 
-    const response = await axios.post(`${AUTH0_DOMAIN}/dbconnections/signup`, {
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: "name, email, and password are required" });
+    }
+
+    // 1) Create user in Auth0
+    const { data: a0 } = await axios.post(`${AUTH0_DOMAIN}/dbconnections/signup`, {
       client_id: CANDIDATE_CLIENT_ID,
       email,
       password,
       connection: AUTH0_CONNECTION,
-      user_metadata: { name, phone },
+      user_metadata: { name },
     });
 
-    // const userId = response.data._id || response.data.user_id;
-    // await assignUserRole(userId);
+    // 2) Insert into candidates table (only the required fields)
+    await client.query("BEGIN");
 
-    res.json({ message: "User registered", user: response.data });
-  } catch (error) {
-    res.status(400).json({
+    const insertSQL = `
+      INSERT INTO public.candidates ( full_name, email, username, password_hash,created_date)
+      VALUES ($1, $2 , $3, $4, NOW())
+      RETURNING candidate_id
+    `;
+    const { rows } = await client.query(insertSQL, [name,  email, name , password ]);
+
+    await client.query("COMMIT");
+
+  
+    return res.json({
+      message: "Candidate registered",
+      auth0_user: a0,
+      candidate_id : rows[0].candidate_id
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+
+    if (err?.code === "23505") {
+      return res.status(409).json({ error: "Candidate ID or Email already exists" });
+    }
+    return res.status(400).json({
       error: "Registration failed",
-      details: error.response?.data || error.message,
+      details: err.response?.data || err.message,
     });
+  } finally {
+    client.release();
   }
 });
+
 
 router.post("/recruiter-login", async (req, res) => {
   try {

@@ -5,7 +5,7 @@ const pool = new Pool({
   host: "101.53.133.152",          
   database: "silbob",
   password: "pI01zRjCzyaxGqt",
-  port: 5432,                  
+  port: 5432,                     
 });
 
 pool.connect()
