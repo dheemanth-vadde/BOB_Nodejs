@@ -7,12 +7,17 @@ const authRoutes = require("./routes/auth");
 const protectedRoutes = require("./routes/protected");
 const offerLettersRouter = require("./routes/offerLetters"); 
 const calendarRoutes = require("./routes/calendar");
-// const paymentsRazorpay = require("./routes/payments.razorpay");
 const gcalRoutes = require("./routes/gcal");
 const paymentsRazorpay = require("./routes/payments.razorpay");
 const { rawBody, jsonBody } = require("./utils/bodyParsers");
 const getDetailsRoutes = require("./routes/getdetails");
 const resumeRoutes = require("./routes/resume");
+// const offerTemplates = require("./routes/offerTemplates");
+
+const {
+  router: razorpayRouter,
+  webhookHandler
+} = require("./routes/payments.razorpay");
 
 
 const app = express();
@@ -40,16 +45,23 @@ app.use(cors({
 }));
 
 
-app.use(jsonBody);     
+app.post(
+  "/api/payments/razorpay/webhook",
+  express.raw({ type: "application/json" }),
+  webhookHandler
+);
 
+
+app.use(express.json()); 
 app.use("/api", protectedRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/offer-letters", offerLettersRouter);
 app.use("/api/gcal", gcalRoutes);
 app.use("/api/calendar",calendarRoutes);
-app.use("/api/payments/razorpay", paymentsRazorpay);
+app.use("/api/payments/razorpay", razorpayRouter);
 app.use("/api/getdetails",getDetailsRoutes);
 app.use("/api/resume",resumeRoutes);
+// app.use("/api/offer-templates", offerTemplates);
 
 
 

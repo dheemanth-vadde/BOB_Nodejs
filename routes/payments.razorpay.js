@@ -1,6 +1,9 @@
+require("dotenv").config();
 const express = require("express");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
+const pool = require("../config/db");
+
 
 const router = express.Router();
 
@@ -8,71 +11,73 @@ const {
   RAZORPAY_KEY_ID,
   RAZORPAY_KEY_SECRET,
   RAZORPAY_WEBHOOK_SECRET,
+  NODE_ENV
 } = process.env;
 
-// Razorpay client
 const rzp = new Razorpay({
   key_id: RAZORPAY_KEY_ID,
   key_secret: RAZORPAY_KEY_SECRET,
 });
 
-// (Demo) in-memory store. In prod, use your DB.
-const ordersStore = new Map();
-
-/**
- * GET /api/payments/razorpay/config
- * Returns keyId so frontend can init checkout
- */
+// ---------- CONFIG ----------
 router.get("/config", (_req, res) => {
-  res.json({ keyId: RAZORPAY_KEY_ID });
+  res.json({ keyId: RAZORPAY_KEY_ID, mode: NODE_ENV === "production" ? "live" : "test" });
 });
 
-/**
- * POST /api/payments/razorpay/orders
- * Body: { amount, currency?, receipt?, notes? }
- * amount is in smallest unit (paise). e.g., ₹499 => 49900
- */
+// ---------- CREATE ORDER: saves to DB ----------
 router.post("/orders", async (req, res) => {
   try {
-    const { amount, currency = "INR", receipt, notes = {} } = req.body;
-
-    if (!amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
-      return res.status(400).json({ error: "Valid 'amount' (in smallest unit) is required" });
+    const { amount, currency = "INR", receipt, notes = {}, candidate_id, position_id } = req.body || {};
+    if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+      return res.status(400).json({ error: "Valid 'amount' (in paise) is required" });
     }
 
+    console.log("Create order body:", req.body);
+
     const order = await rzp.orders.create({
-      amount: Number(amount),
+      amount: Number(amount), // in paise
       currency,
       receipt: receipt || `rcpt_${Date.now()}`,
       notes,
     });
 
-    ordersStore.set(order.id, {
-      id: order.id,
-      amount: order.amount,
-      currency: order.currency,
-      status: order.status, // created
-      receipt: order.receipt,
-      notes: order.notes || {},
-      created_at: order.created_at,  
-    });
+    console.log("Razorpay order:", order);
+
+    await pool.query(
+      `INSERT INTO razorpay_orders
+         (order_id, amount, currency, status, receipt, notes, candidate_id, position_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7, $8)
+       ON CONFLICT (order_id) DO NOTHING`,
+      [
+        order.id,
+        order.amount,
+        order.currency,
+        order.status,
+        order.receipt,
+        JSON.stringify(order.notes || {}),
+        candidate_id,
+        position_id
+      ]
+    );
 
     res.json({ order });
   } catch (err) {
-    console.error("Create order error:", err.error || err.message);
-    res.status(500).json({ error: "Failed to create order" });
+    console.error("Create order error:", {
+      message: err?.message,
+      error: err?.error,
+      statusCode: err?.statusCode,
+      stack: err?.stack
+    });
+    const reason = err?.error?.description || err?.message || "Failed to create order";
+    res.status(500).json({ error: reason });
   }
 });
 
-/**
- * POST /api/payments/razorpay/verify
- * Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature }
- * Verifies checkout success on server using key secret
- */
-router.post("/verify", (req, res) => {
-  try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
 
+// ---------- VERIFY: marks as 'paid' in DB ----------
+router.post("/verify", async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
       return res.status(400).json({ error: "Missing verification fields" });
     }
@@ -87,14 +92,16 @@ router.post("/verify", (req, res) => {
       return res.status(400).json({ success: false, error: "Invalid signature" });
     }
 
-    // mark paid (demo)
-    const existing = ordersStore.get(razorpay_order_id);
-    if (existing) {
-      existing.status = "paid";
-      existing.payment_id = razorpay_payment_id;
-      existing.verified_at = Date.now();
-      ordersStore.set(razorpay_order_id, existing);
-    }
+    // (Optional but recommended) confirm with Razorpay
+    // const payment = await rzp.payments.fetch(razorpay_payment_id);
+    // if (payment.order_id !== razorpay_order_id) return res.status(400).json({ success:false, error:"Payment mismatch" });
+
+    await pool.query(
+      `UPDATE razorpay_orders
+         SET status=$1, payment_id=$2, signature=$3, updated_at=NOW()
+       WHERE order_id=$4`,
+      ["paid", razorpay_payment_id, razorpay_signature, razorpay_order_id]
+    ); // :contentReference[oaicite:4]{index=4}
 
     res.json({ success: true, message: "Payment verified" });
   } catch (err) {
@@ -103,59 +110,55 @@ router.post("/verify", (req, res) => {
   }
 });
 
-/**
- * POST /api/payments/razorpay/webhook
- * This route must receive RAW body for signature verification.
- * Configure this URL in Razorpay Dashboard → Webhooks.
- */
-router.post("/webhook", (req, res) => {
+// ---------- DEV: read one ----------
+router.get("/orders/:orderId", async (req, res) => {
+  const { orderId } = req.params;
+  const { rows } = await pool.query(
+    "SELECT * FROM razorpay_orders WHERE order_id=$1",
+    [orderId]
+  ); // :contentReference[oaicite:5]{index=5}
+
+  if (rows.length === 0) return res.status(404).json({ error: "Not found" });
+  res.json(rows[0]);
+});
+
+// ---------- WEBHOOK (RAW BODY) ----------
+async function webhookHandler(req, res) {
   try {
-    const signature = req.header("x-razorpay-signature");
+    const signature = req.get("x-razorpay-signature");
     if (!signature) return res.status(400).send("Missing signature");
 
     const expected = crypto
       .createHmac("sha256", RAZORPAY_WEBHOOK_SECRET)
-      .update(req.body) // raw Buffer
+      .update(req.body) // Buffer (raw)
       .digest("hex");
 
-    if (signature !== expected) {
-      console.warn("❌ Invalid Razorpay webhook signature");
-      return res.status(400).send("Invalid signature");
-    }
+    if (signature !== expected) return res.status(400).send("Invalid signature");
 
     const event = JSON.parse(req.body.toString("utf8"));
     const type = event?.event;
 
-    // Example: on payment.captured, mark order captured
+    // On payment.captured → update DB
     if (type === "payment.captured") {
-      const orderId = event?.payload?.payment?.entity?.order_id;
+      const orderId   = event?.payload?.payment?.entity?.order_id;
       const paymentId = event?.payload?.payment?.entity?.id;
-      const amount = event?.payload?.payment?.entity?.amount;
+      const amount    = event?.payload?.payment?.entity?.amount;
 
-      const rec = ordersStore.get(orderId);
-      if (rec) {
-        rec.status = "captured";
-        rec.payment_id = paymentId;
-        rec.captured_amount = amount;
-        rec.webhook_updated_at = Date.now();
-        ordersStore.set(orderId, rec);
+      if (orderId && paymentId) {
+        await pool.query(
+          `UPDATE razorpay_orders
+             SET status=$1, payment_id=$2, captured_amount=$3, updated_at=NOW()
+           WHERE order_id=$4`,
+          ["captured", paymentId, amount, orderId]
+        ); // :contentReference[oaicite:6]{index=6}
       }
     }
 
     return res.sendStatus(200);
   } catch (err) {
-    console.error("Webhook error:", err.message);
+    console.error("Webhook error:", err);
     return res.sendStatus(500);
   }
-});
+}
 
-/**
- * GET /api/payments/razorpay/orders/:orderId  (dev helper)
- */
-router.get("/orders/:orderId", (req, res) => {
-  const rec = ordersStore.get(req.params.orderId);
-  if (!rec) return res.status(404).json({ error: "Not found" });
-  res.json(rec);
-});
-
-module.exports = router;
+module.exports = { router, webhookHandler };
