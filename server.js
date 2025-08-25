@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 
 
 const authRoutes = require("./routes/auth");
@@ -12,7 +13,7 @@ const paymentsRazorpay = require("./routes/payments.razorpay");
 const { rawBody, jsonBody } = require("./utils/bodyParsers");
 const getDetailsRoutes = require("./routes/getdetails");
 const resumeRoutes = require("./routes/resume");
-// const offerTemplates = require("./routes/offerTemplates");
+const offerTemplates = require("./routes/offerTemplates");
 
 const {
   router: razorpayRouter,
@@ -52,6 +53,17 @@ app.post(
 );
 
 
+app.use(
+  "/Recruiter/Resumes",
+  express.static(path.join(__dirname, "path/to/Resumes"), {
+    setHeaders: (res, filepath) => {
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+    },
+  })
+);
+
 app.use(express.json()); 
 app.use("/api", protectedRoutes);
 app.use("/api/auth", authRoutes);
@@ -61,7 +73,7 @@ app.use("/api/calendar",calendarRoutes);
 app.use("/api/payments/razorpay", razorpayRouter);
 app.use("/api/getdetails",getDetailsRoutes);
 app.use("/api/resume",resumeRoutes);
-// app.use("/api/offer-templates", offerTemplates);
+app.use("/api/offer-templates", offerTemplates);
 
 
 

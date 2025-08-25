@@ -52,43 +52,63 @@ const upload = multer({
 router.post("/upload", upload.single("resumeFile"), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Missing file (field name: resumeFile)" });
- 
+
     let { candidateId } = req.body;
     if (!candidateId) {
-      try { fs.unlinkSync(path.join(FILE_STORAGE_PATH, req._tmpUploadName)); } catch {}
+      try { fs.unlinkSync(path.join(FILE_STORAGE_PATH, req._tmpUploadName || req.file.filename)); } catch {}
       return res.status(400).json({ error: "Missing candidateId field" });
     }
- 
-    // Basic sanitize of candidateId for filename safety
+
     candidateId = String(candidateId).replace(/[^a-zA-Z0-9_-]/g, "");
- 
+
     const originalExt = path.extname(req.file.originalname).toLowerCase();
     const finalName = `Resume_${candidateId}${originalExt}`;
-    const from = path.join(FILE_STORAGE_PATH, req._tmpUploadName);
+    const tmpName = req._tmpUploadName || req.file.filename; // ensure your multer sets one of these
+    const from = path.join(FILE_STORAGE_PATH, tmpName);
     const to = path.join(FILE_STORAGE_PATH, finalName);
- 
-    // Rename (overwrite if exists)
+
+    // Remove any older resume for this candidate across allowed extensions
+    for (const ext of ALLOWED_EXT) {
+      const existing = path.join(FILE_STORAGE_PATH, `Resume_${candidateId}${ext}`);
+      if (fs.existsSync(existing)) {
+        try { fs.unlinkSync(existing); } catch (e) {
+          console.warn("Could not remove previous resume:", existing, e.message);
+        }
+      }
+    }
+
+    // Move/replace atomically
     fs.renameSync(from, to);
- 
+
+    // Optional: ensure readable by web server
+    try { fs.chmodSync(to, 0o644); } catch {}
+
+    // Add a cache-busting version token the client can use
+    const version = Date.now();
+
     return res.json({
       message: "Resume uploaded successfully",
       candidateId,
       filename: finalName,
       public_url: `${PUBLIC_BASE_URL}/${finalName}`,
+      // client should append ?v=<version> when loading
+      version,
       mime_type: req.file.mimetype,
       size_bytes: req.file.size
     });
   } catch (err) {
     console.error("Resume upload error:", err);
-    // Try to clean temp file if something failed after upload
-    if (req?._tmpUploadName) {
-      try { fs.unlinkSync(path.join(FILE_STORAGE_PATH, req._tmpUploadName)); } catch {}
-    }
+    try {
+      if (req?._tmpUploadName) fs.unlinkSync(path.join(FILE_STORAGE_PATH, req._tmpUploadName));
+      else if (req?.file?.filename) fs.unlinkSync(path.join(FILE_STORAGE_PATH, req.file.filename));
+    } catch {}
+
     const friendly = /Only resume files/.test(err?.message)
       ? err.message
       : "Failed to upload resume";
     res.status(500).json({ error: friendly });
   }
 });
+
  
 module.exports = router;
