@@ -17,36 +17,52 @@ const {
 router.post("/recruiter-register", async (req, res) => {
   const client = await pool.connect();
   try {
-    const { name, email, password, role } = req.body; 
+    const { name, email, password, role } = req.body;
 
-    if (!name || !email || !password) {
-      return res.status(400).json({ error: "name, email, and password are required" });
+    if (!name || !email || !password || !role) {
+      return res
+        .status(400)
+        .json({ error: "name, email, password, and role are required" });
     }
 
-    // 1) Create user in Auth0
-    const { data: a0 } = await axios.post(`${AUTH0_DOMAIN}/dbconnections/signup`, {
-      client_id: RECRUITER_CLIENT_ID,
-      email,
-      password,
-      connection: AUTH0_CONNECTION,
-      user_metadata: { name },
-    });
+    let a0 = null;
+    const isInterviewer = String(role).toLowerCase() === "interviewer";
 
-    // 2) Insert into Postgres with role fixed to 'recruiter'
+    // 1) Create user in Auth0 for NON-interviewer roles only
+    if (!isInterviewer) {
+      const { data } = await axios.post(
+        `${AUTH0_DOMAIN}/dbconnections/signup`,
+        {
+          client_id: RECRUITER_CLIENT_ID,
+          email,
+          password,
+          connection: AUTH0_CONNECTION,
+          user_metadata: { name },
+        }
+      );
+      a0 = data; // <- assign the response data to a0
+    }
+
+    // 2) Insert into Postgres
     await client.query("BEGIN");
-
     const insertSQL = `
       INSERT INTO public.users (name, role, email, manager_id)
       VALUES ($1, $2, $3, $4)
       RETURNING userid
     `;
-    const { rows } = await client.query(insertSQL, [name, role, email, "2"]);
-
+    const { rows } = await client.query(insertSQL, [
+      name,
+      role,       // e.g. "Interviewer" or "Recruiter"
+      email,
+      "2",
+    ]);
     await client.query("COMMIT");
 
     return res.json({
-      message: "User registered",
-      auth0_user: a0,
+      message: isInterviewer
+        ? "Interviewer registered (DB only)"
+        : "User registered",
+      auth0_user: a0,                 // null for Interviewer
       local_user_id: rows[0].userid,
     });
   } catch (err) {
@@ -64,6 +80,7 @@ router.post("/recruiter-register", async (req, res) => {
     client.release();
   }
 });
+
 
 router.post("/candidate-register", async (req, res) => {
   const client = await pool.connect();

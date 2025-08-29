@@ -69,7 +69,7 @@ router.get("/users/all", async (req, res) => {
   const client = await pool.connect();
   try {
     const sql = `
-      SELECT name, role, email
+      SELECT userid,name, role, email
       FROM public.users
       ORDER BY name ASC
     `;
