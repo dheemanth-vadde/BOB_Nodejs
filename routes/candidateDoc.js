@@ -8,7 +8,7 @@ const router = express.Router();
 // Use OS-specific path for document storage
 const isWindows = process.platform === "win32";
 const DOC_STORAGE_PATH = "/var/www/html/documents/Candidate";
-const PUBLIC_BASE_URL = "https://docs.sentrifugo.com/Recruiter/OfferLetters";
+const PUBLIC_BASE_URL = "https://docs.sentrifugo.com/Candidate";
 
 // Ensure folder exists
 if (!fs.existsSync(DOC_STORAGE_PATH)) {
