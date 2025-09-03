@@ -14,6 +14,7 @@ const { rawBody, jsonBody } = require("./utils/bodyParsers");
 const getDetailsRoutes = require("./routes/getdetails");
 const resumeRoutes = require("./routes/resume");
 const offerTemplates = require("./routes/offerTemplates");
+const candidateDocs = require("./routes/candidateDoc"); 
 
 const {
   router: razorpayRouter,
@@ -74,6 +75,7 @@ app.use("/api/payments/razorpay", razorpayRouter);
 app.use("/api/getdetails",getDetailsRoutes);
 app.use("/api/resume",resumeRoutes);
 app.use("/api/offer-templates", offerTemplates);
+app.use("/api/uploaddoc", candidateDocs);
 
 
 
