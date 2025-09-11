@@ -32,7 +32,7 @@ router.post("/recruiter-register", async (req, res) => {
   try {
     const { name, email, password: encryptedPassword, role } = req.body;
 
-    if (!name || !email || !password || !role) {
+    if (!name || !email || !encryptedPassword || !role) {
       return res
         .status(400)
         .json({ error: "name, email, password, and role are required" });
@@ -106,7 +106,7 @@ router.post("/candidate-register", async (req, res) => {
   try {
     const { name, email, password: encryptedPassword } = req.body;
 
-    if (!name || !email || !password) {
+    if (!name || !email || !encryptedPassword) {
       return res.status(400).json({ error: "name, email, and password are required" });
     }
 
