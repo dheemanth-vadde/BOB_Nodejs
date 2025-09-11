@@ -18,7 +18,9 @@ const slugify = (s) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)+/g, "");
 
-// ---- NO limits here
+const isValidHtmlId = (id) => /^[A-Za-z0-9._-]+\.html$/.test(id);
+
+// ---- temp storage for upload
 const storage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, TEMPLATE_STORAGE_PATH),
   filename: (req, file, cb) => {
@@ -41,25 +43,74 @@ const uploadHtml = multer({
   },
 });
 
-// Wrap to return JSON errors
+// CREATE or REPLACE (delete-old + save-new-with-new-name)
 router.post("/upload", uploadHtml.single("templateFile"), (req, res) => {
+  const tmpPath = path.join(TEMPLATE_STORAGE_PATH, req._tmpUploadName || "");
   try {
     if (!req.file) return res.status(400).json({ error: "Missing templateFile" });
-    const { name } = req.body || {};
+
+    const { name, id } = req.body || {};
+
+    // If id is present -> REPLACE: delete old and save new with new name
+    if (id) {
+      if (!isValidHtmlId(id)) {
+        try { fs.unlinkSync(tmpPath); } catch {}
+        return res.status(400).json({ error: "Bad template id" });
+      }
+      const oldPath = path.join(TEMPLATE_STORAGE_PATH, id);
+      if (!fs.existsSync(oldPath)) {
+        try { fs.unlinkSync(tmpPath); } catch {}
+        return res.status(404).json({ error: "Template not found" });
+      }
+      if (!name) {
+        try { fs.unlinkSync(tmpPath); } catch {}
+        return res.status(400).json({ error: "Missing name for replacement" });
+      }
+
+      // 1) delete old
+      try { fs.unlinkSync(oldPath); } catch (e) {
+        try { fs.unlinkSync(tmpPath); } catch {}
+        return res.status(500).json({ error: "Failed to delete existing template" });
+      }
+
+      // 2) save new with new name (timestamped)
+      const newFileName = `Offer_Template_${slugify(name)}_${Date.now()}.html`;
+      const newPath = path.join(TEMPLATE_STORAGE_PATH, newFileName);
+      fs.renameSync(tmpPath, newPath);
+
+      // Log HTML
+      const htmlContent = fs.readFileSync(newPath, "utf8");
+      console.log("===== Replaced Template (new file) =====");
+      console.log(`Old ID: ${id}`);
+      console.log(`New ID: ${newFileName}`);
+      console.log(htmlContent);
+      console.log("========================================");
+
+      return res.json({
+        message: "Template replaced with new name",
+        // return the NEW id
+        id: newFileName,
+        name,
+        type: "html",
+        path: `${PUBLIC_BASE_URL}/${newFileName}`,
+        replaced: true,
+        deleted_previous: true,
+      });
+    }
+
+    // CREATE new (no id)
     if (!name) {
-      try { fs.unlinkSync(path.join(TEMPLATE_STORAGE_PATH, req._tmpUploadName)); } catch {}
+      try { fs.unlinkSync(tmpPath); } catch {}
       return res.status(400).json({ error: "Missing name" });
     }
 
     const final = `Offer_Template_${slugify(name)}_${Date.now()}.html`;
-    const tmpPath = path.join(TEMPLATE_STORAGE_PATH, req._tmpUploadName);
     const finalPath = path.join(TEMPLATE_STORAGE_PATH, final);
-
     fs.renameSync(tmpPath, finalPath);
 
-    // 👉 Read the HTML and print it in backend terminal
     const htmlContent = fs.readFileSync(finalPath, "utf8");
     console.log("===== Uploaded Template HTML =====");
+    console.log(`ID: ${final}`);
     console.log(htmlContent);
     console.log("=================================");
 
@@ -69,15 +120,16 @@ router.post("/upload", uploadHtml.single("templateFile"), (req, res) => {
       name,
       type: "html",
       path: `${PUBLIC_BASE_URL}/${final}`,
+      replaced: false,
     });
   } catch (e) {
     console.error("Template upload error:", e);
+    try { fs.unlinkSync(tmpPath); } catch {}
     return res.status(500).json({ error: "Failed to upload template" });
   }
 });
 
-
-// List + Content routes unchanged…
+// List templates
 router.get("/", (_, res) => {
   try {
     const files = fs.readdirSync(TEMPLATE_STORAGE_PATH)
@@ -95,9 +147,10 @@ router.get("/", (_, res) => {
   }
 });
 
+// Get template content
 router.get("/:id/content", (req, res) => {
   const id = req.params.id;
-  if (!/^[A-Za-z0-9._-]+\.html$/.test(id)) {
+  if (!isValidHtmlId(id)) {
     return res.status(400).json({ error: "Bad template id" });
   }
   const full = path.join(TEMPLATE_STORAGE_PATH, id);
