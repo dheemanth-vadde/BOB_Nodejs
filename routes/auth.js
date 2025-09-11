@@ -3,6 +3,9 @@ const axios = require("axios");
 const router = express.Router();
 const pool = require("../config/db");
 const CryptoJS = require("crypto-js");
+const jwt = require("jsonwebtoken");
+const jwksClient = require("jwks-rsa");
+
 const SECRET_KEY = "fdf4-832b-b4fd-ccfb9258a6b3";
 
 const {
@@ -15,6 +18,39 @@ const {
   M2M_CLIENT_ID,
   M2M_CLIENT_SECRET,
 } = process.env;
+
+// Auth0 JWKS client setup
+const jwks = jwksClient({
+  jwksUri: `${AUTH0_DOMAIN}/.well-known/jwks.json`
+});
+
+// Helper to get signing key
+function getKey(header, callback) {
+  jwks.getSigningKey(header.kid, function (err, key) {
+    if (err) return callback(err);
+    const signingKey = key.getPublicKey();
+    callback(null, signingKey);
+  });
+}
+
+// Token validation function
+async function validateAccessToken(token) {
+  return new Promise((resolve, reject) => {
+    jwt.verify(
+      token,
+      getKey,
+      {
+        audience: `${AUTH0_DOMAIN}/api/v2/`,
+        issuer: `${AUTH0_DOMAIN}/`,
+        algorithms: ["RS256"]
+      },
+      (err, decoded) => {
+        if (err) return reject(err);
+        resolve(decoded);
+      }
+    );
+  });
+}
 
 // 🔑 AES Decrypt helper
 function decryptPassword(encryptedPassword) {
@@ -162,7 +198,6 @@ router.post("/candidate-register", async (req, res) => {
 router.post("/recruiter-login", async (req, res) => {
   try {
     const { email, password: encryptedPassword } = req.body;
-
     const password = decryptPassword(encryptedPassword);
 
     // Get token from Auth0
@@ -180,6 +215,13 @@ router.post("/recruiter-login", async (req, res) => {
     const accessToken = tokenRes.data.access_token;
     const refreshToken = tokenRes.data.refresh_token;
     const idToken = tokenRes.data.id_token;
+
+    // ✅ Validate access token before proceeding
+    try {
+      await validateAccessToken(accessToken);
+    } catch (tokenErr) {
+      return res.status(401).json({ error: "Invalid or expired access token" });
+    }
 
     // Fetch user info to check if email is verified
     const userInfoRes = await axios.get(`${AUTH0_DOMAIN}/userinfo`, {
@@ -218,25 +260,29 @@ router.post("/recruiter-login", async (req, res) => {
       .cookie("access_token", accessToken, {
         httpOnly: true,
         secure: true,
-        sameSite: "Strict",
+        sameSite: "None",
         maxAge: 15 * 60 * 1000, // 15 min
         path: "/",
       })
       .cookie("refresh_token", refreshToken, {
         httpOnly: true,
         secure: true,
-        sameSite: "Strict",
+        sameSite: "None",
         maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
         path: "/",
       })
       .cookie("id_token", idToken, {
         httpOnly: true,
         secure: true,
-        sameSite: "Strict",
+        sameSite: "None",
         maxAge: 15 * 60 * 1000,
         path: "/",
       })
-      .json({ user }); // safe user info only
+      .json({ 
+        user,
+        access_token: accessToken, // 🔑 send back too
+        id_token: idToken,         // 🔑 send back too
+      });
 
   } catch (error) {
     const errData = error.response?.data;
@@ -259,7 +305,6 @@ router.post("/recruiter-login", async (req, res) => {
 router.post("/candidate-login", async (req, res) => {
   try {
     const { email, password: encryptedPassword } = req.body;
-
     const password = decryptPassword(encryptedPassword);
 
     // Get token from Auth0
@@ -277,6 +322,13 @@ router.post("/candidate-login", async (req, res) => {
     const accessToken = tokenRes.data.access_token;
     const refreshToken = tokenRes.data.refresh_token;
     const idToken = tokenRes.data.id_token;
+
+    // ✅ Validate access token before proceeding
+    try {
+      await validateAccessToken(accessToken);
+    } catch (tokenErr) {
+      return res.status(401).json({ error: "Invalid or expired access token" });
+    }
 
     // Fetch user info to check if email is verified
     const userInfoRes = await axios.get(`${AUTH0_DOMAIN}/userinfo`, {
@@ -310,25 +362,29 @@ router.post("/candidate-login", async (req, res) => {
       .cookie("access_token", accessToken, {
         httpOnly: true,
         secure: true,
-        sameSite: "Strict",
+        sameSite: "None",
         maxAge: 15 * 60 * 1000, // 15 min
         path: "/",
       })
       .cookie("refresh_token", refreshToken, {
         httpOnly: true,
         secure: true,
-        sameSite: "Strict",
+        sameSite: "None",
         maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
         path: "/",
       })
       .cookie("id_token", idToken, {
         httpOnly: true,
         secure: true,
-        sameSite: "Strict",
+        sameSite: "None",
         maxAge: 15 * 60 * 1000,
         path: "/",
       })
-      .json({ user }); // safe user info only
+      .json({
+        user,
+        access_token: accessToken, // 🔑 send back too
+        id_token: idToken,         // 🔑 send back too
+      }); // safe user info only
 
   } catch (error) {
     const errData = error.response?.data;
@@ -504,19 +560,26 @@ router.post("/recruiter-refresh-token", async (req, res) => {
     const accessToken = tokenRes.data.access_token;
     const idToken = tokenRes.data.id_token;
 
+    // ✅ Validate access token before proceeding
+    try {
+      await validateAccessToken(accessToken);
+    } catch (tokenErr) {
+      return res.status(401).json({ error: "Invalid or expired access token" });
+    }
+
     // res.json({ access_token: r.data.access_token, id_token: r.data.id_token });
     res
       .cookie("access_token", accessToken, {
         httpOnly: true,
         secure: true,
-        sameSite: "Strict",
+        sameSite: "None",
         maxAge: 15 * 60 * 1000,
         path: "/",
       })
       .cookie("id_token", idToken, {
         httpOnly: true,
         secure: true,
-        sameSite: "Strict",
+        sameSite: "None",
         maxAge: 15 * 60 * 1000,
         path: "/",
       })
@@ -544,18 +607,25 @@ router.post("/candidate-refresh-token", async (req, res) => {
     const accessToken = tokenRes.data.access_token;
     const idToken = tokenRes.data.id_token;
 
+    // ✅ Validate access token before proceeding
+    try {
+      await validateAccessToken(accessToken);
+    } catch (tokenErr) {
+      return res.status(401).json({ error: "Invalid or expired access token" });
+    }
+
     res
       .cookie("access_token", accessToken, {
         httpOnly: true,
         secure: true,
-        sameSite: "Strict",
+        sameSite: "None",
         maxAge: 15 * 60 * 1000,
         path: "/",
       })
       .cookie("id_token", idToken, {
         httpOnly: true,
         secure: true,
-        sameSite: "Strict",
+        sameSite: "None",
         maxAge: 15 * 60 * 1000,
         path: "/",
       })
