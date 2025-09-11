@@ -2,6 +2,11 @@ const express = require("express");
 const axios = require("axios");
 const router = express.Router();
 const pool = require("../config/db");
+const CryptoJS = require("crypto-js");
+const jwt = require("jsonwebtoken");
+const jwksClient = require("jwks-rsa");
+
+const SECRET_KEY = "fdf4-832b-b4fd-ccfb9258a6b3";
 
 const {
   AUTH0_DOMAIN,
@@ -14,15 +19,64 @@ const {
   M2M_CLIENT_SECRET,
 } = process.env;
 
+// Auth0 JWKS client setup
+const jwks = jwksClient({
+  jwksUri: `${AUTH0_DOMAIN}/.well-known/jwks.json`
+});
+
+// Helper to get signing key
+function getKey(header, callback) {
+  jwks.getSigningKey(header.kid, function (err, key) {
+    if (err) return callback(err);
+    const signingKey = key.getPublicKey();
+    callback(null, signingKey);
+  });
+}
+
+// Token validation function
+async function validateAccessToken(token) {
+  return new Promise((resolve, reject) => {
+    jwt.verify(
+      token,
+      getKey,
+      {
+        audience: `${AUTH0_DOMAIN}/api/v2/`,
+        issuer: `${AUTH0_DOMAIN}/`,
+        algorithms: ["RS256"]
+      },
+      (err, decoded) => {
+        if (err) return reject(err);
+        resolve(decoded);
+      }
+    );
+  });
+}
+
+// 🔑 AES Decrypt helper
+function decryptPassword(encryptedPassword) {
+  try {
+    const bytes = CryptoJS.AES.decrypt(encryptedPassword, SECRET_KEY);
+    return bytes.toString(CryptoJS.enc.Utf8); // plain text
+  } catch (err) {
+    console.error("Decryption failed:", err);
+    return null;
+  }
+}
+
 router.post("/recruiter-register", async (req, res) => {
   const client = await pool.connect();
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password: encryptedPassword, role } = req.body;
 
-    if (!name || !email || !password || !role) {
+    if (!name || !email || !encryptedPassword || !role) {
       return res
         .status(400)
         .json({ error: "name, email, password, and role are required" });
+    }
+
+    const decryptedPassword = decryptPassword(encryptedPassword);
+    if (!decryptedPassword) {
+      return res.status(400).json({ error: "Invalid password encryption" });
     }
 
     let a0 = null;
@@ -35,7 +89,7 @@ router.post("/recruiter-register", async (req, res) => {
         {
           client_id: RECRUITER_CLIENT_ID,
           email,
-          password,
+          password: decryptedPassword,
           connection: AUTH0_CONNECTION,
           user_metadata: { name },
         }
@@ -46,8 +100,8 @@ router.post("/recruiter-register", async (req, res) => {
     // 2) Insert into Postgres
     await client.query("BEGIN");
     const insertSQL = `
-      INSERT INTO public.users (name, role, email, manager_id)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO public.users (name, role, email, manager_id, user_password)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING userid
     `;
     const { rows } = await client.query(insertSQL, [
@@ -55,6 +109,7 @@ router.post("/recruiter-register", async (req, res) => {
       role,       // e.g. "Interviewer" or "Recruiter"
       email,
       "2",
+      encryptedPassword, // store encrypted version
     ]);
     await client.query("COMMIT");
 
@@ -85,17 +140,23 @@ router.post("/recruiter-register", async (req, res) => {
 router.post("/candidate-register", async (req, res) => {
   const client = await pool.connect();
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password: encryptedPassword } = req.body;
 
-    if (!name || !email || !password) {
+    if (!name || !email || !encryptedPassword) {
       return res.status(400).json({ error: "name, email, and password are required" });
+    }
+
+    // Decrypt for Auth0
+    const decryptedPassword = decryptPassword(encryptedPassword);
+    if (!decryptedPassword) {
+      return res.status(400).json({ error: "Invalid password encryption" });
     }
 
     // 1) Create user in Auth0
     const { data: a0 } = await axios.post(`${AUTH0_DOMAIN}/dbconnections/signup`, {
       client_id: CANDIDATE_CLIENT_ID,
       email,
-      password,
+      password: decryptedPassword,
       connection: AUTH0_CONNECTION,
       user_metadata: { name },
     });
@@ -104,11 +165,11 @@ router.post("/candidate-register", async (req, res) => {
     await client.query("BEGIN");
 
     const insertSQL = `
-      INSERT INTO public.candidates ( full_name, email, username, password_hash,created_date)
+      INSERT INTO public.candidates ( full_name, email, username, password_hash, created_date)
       VALUES ($1, $2 , $3, $4, NOW())
       RETURNING candidate_id
     `;
-    const { rows } = await client.query(insertSQL, [name,  email, name , password ]);
+    const { rows } = await client.query(insertSQL, [name,  email, name , encryptedPassword ]);
 
     await client.query("COMMIT");
 
@@ -136,7 +197,8 @@ router.post("/candidate-register", async (req, res) => {
 
 router.post("/recruiter-login", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password: encryptedPassword } = req.body;
+    const password = decryptPassword(encryptedPassword);
 
     // Get token from Auth0
     const tokenRes = await axios.post(`${AUTH0_DOMAIN}/oauth/token`, {
@@ -151,6 +213,15 @@ router.post("/recruiter-login", async (req, res) => {
     });
 
     const accessToken = tokenRes.data.access_token;
+    const refreshToken = tokenRes.data.refresh_token;
+    const idToken = tokenRes.data.id_token;
+
+    // ✅ Validate access token before proceeding
+    try {
+      await validateAccessToken(accessToken);
+    } catch (tokenErr) {
+      return res.status(401).json({ error: "Invalid or expired access token" });
+    }
 
     // Fetch user info to check if email is verified
     const userInfoRes = await axios.get(`${AUTH0_DOMAIN}/userinfo`, {
@@ -179,11 +250,39 @@ router.post("/recruiter-login", async (req, res) => {
     }
 
     // Success
-    return res.json({
-      access_token: accessToken,
-      id_token: tokenRes.data.id_token,
-      user,
-    });
+    // return res.json({
+    //   access_token: accessToken,
+    //   id_token: tokenRes.data.id_token,
+    //   user,
+    // });
+    // ✅ Set HTTP-only cookies
+    res
+      .cookie("access_token", accessToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 15 * 60 * 1000, // 15 min
+        path: "/",
+      })
+      .cookie("refresh_token", refreshToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        path: "/",
+      })
+      .cookie("id_token", idToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 15 * 60 * 1000,
+        path: "/",
+      })
+      .json({ 
+        user,
+        access_token: accessToken, // 🔑 send back too
+        id_token: idToken,         // 🔑 send back too
+      });
 
   } catch (error) {
     const errData = error.response?.data;
@@ -205,7 +304,8 @@ router.post("/recruiter-login", async (req, res) => {
 
 router.post("/candidate-login", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password: encryptedPassword } = req.body;
+    const password = decryptPassword(encryptedPassword);
 
     // Get token from Auth0
     const tokenRes = await axios.post(`${AUTH0_DOMAIN}/oauth/token`, {
@@ -220,6 +320,15 @@ router.post("/candidate-login", async (req, res) => {
     });
 
     const accessToken = tokenRes.data.access_token;
+    const refreshToken = tokenRes.data.refresh_token;
+    const idToken = tokenRes.data.id_token;
+
+    // ✅ Validate access token before proceeding
+    try {
+      await validateAccessToken(accessToken);
+    } catch (tokenErr) {
+      return res.status(401).json({ error: "Invalid or expired access token" });
+    }
 
     // Fetch user info to check if email is verified
     const userInfoRes = await axios.get(`${AUTH0_DOMAIN}/userinfo`, {
@@ -248,11 +357,34 @@ router.post("/candidate-login", async (req, res) => {
     }
 
     // Success
-    return res.json({
-      access_token: accessToken,
-      id_token: tokenRes.data.id_token,
-      user,
-    });
+    // ✅ Set HTTP-only cookies
+    res
+      .cookie("access_token", accessToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 15 * 60 * 1000, // 15 min
+        path: "/",
+      })
+      .cookie("refresh_token", refreshToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        path: "/",
+      })
+      .cookie("id_token", idToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 15 * 60 * 1000,
+        path: "/",
+      })
+      .json({
+        user,
+        access_token: accessToken, // 🔑 send back too
+        id_token: idToken,         // 🔑 send back too
+      }); // safe user info only
 
   } catch (error) {
     const errData = error.response?.data;
@@ -414,16 +546,44 @@ router.post("/candidate-forgot-password", async (req, res) => {
 
 
 router.post("/recruiter-refresh-token", async (req, res) => {
-  const { refresh_token } = req.body;
+  const refreshToken = req.cookies.refresh_token
+  if (!refreshToken) return res.status(401).json({ error: "No refresh token" });
+  
   try {
     const r = await axios.post(`${AUTH0_DOMAIN}/oauth/token`, {
       grant_type: "refresh_token",
       client_id: RECRUITER_CLIENT_ID,
       client_secret: RECRUITER_CLIENT_SECRET,
-      refresh_token,
+      refresh_token: refreshToken,
     });
 
-    res.json({ access_token: r.data.access_token, id_token: r.data.id_token });
+    const accessToken = tokenRes.data.access_token;
+    const idToken = tokenRes.data.id_token;
+
+    // ✅ Validate access token before proceeding
+    try {
+      await validateAccessToken(accessToken);
+    } catch (tokenErr) {
+      return res.status(401).json({ error: "Invalid or expired access token" });
+    }
+
+    // res.json({ access_token: r.data.access_token, id_token: r.data.id_token });
+    res
+      .cookie("access_token", accessToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 15 * 60 * 1000,
+        path: "/",
+      })
+      .cookie("id_token", idToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 15 * 60 * 1000,
+        path: "/",
+      })
+      .json({ message: "Token refreshed" });
   } catch (e) {
     res.status(401).json({
       error: "Failed to refresh token",
@@ -433,24 +593,50 @@ router.post("/recruiter-refresh-token", async (req, res) => {
 });
 
 router.post("/candidate-refresh-token", async (req, res) => {
-  const { refresh_token } = req.body;
+  const refreshToken = req.cookies.refresh_token;
+  if (!refreshToken) return res.status(401).json({ error: "No refresh token" });
+
   try {
-    const r = await axios.post(`${AUTH0_DOMAIN}/oauth/token`, {
+    const tokenRes = await axios.post(`${AUTH0_DOMAIN}/oauth/token`, {
       grant_type: "refresh_token",
       client_id: CANDIDATE_CLIENT_ID,
       client_secret: CANDIDATE_CLIENT_SECRET,
-      refresh_token,
+      refresh_token: refreshToken,
     });
 
-    res.json({ access_token: r.data.access_token, id_token: r.data.id_token });
+    const accessToken = tokenRes.data.access_token;
+    const idToken = tokenRes.data.id_token;
+
+    // ✅ Validate access token before proceeding
+    try {
+      await validateAccessToken(accessToken);
+    } catch (tokenErr) {
+      return res.status(401).json({ error: "Invalid or expired access token" });
+    }
+
+    res
+      .cookie("access_token", accessToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 15 * 60 * 1000,
+        path: "/",
+      })
+      .cookie("id_token", idToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 15 * 60 * 1000,
+        path: "/",
+      })
+      .json({ message: "Token refreshed", access_token: accessToken, id_token: idToken });
   } catch (e) {
     res.status(401).json({
       error: "Failed to refresh token",
-      details: e.response?.data || e.message
+      details: e.response?.data || e.message,
     });
   }
 });
-
 
 
 

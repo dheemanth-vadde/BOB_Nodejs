@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const cookieParser = require("cookie-parser");
 
 
 const authRoutes = require("./routes/auth");
@@ -65,6 +66,7 @@ app.use(
   })
 );
 
+app.use(cookieParser());
 app.use(express.json()); 
 app.use("/api", protectedRoutes);
 app.use("/api/auth", authRoutes);

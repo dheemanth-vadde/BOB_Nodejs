@@ -67,6 +67,8 @@ router.post("/candidates", async (req, res) => {
 // Get all users (only name, role, email)
 router.get("/users/all", async (req, res) => {
   const client = await pool.connect();
+  // const token = req.cookies.access_token;
+  // console.log("Token in getdetails/users/all:", token); // Debug log
   try {
     const sql = `
       SELECT userid,name, role, email
