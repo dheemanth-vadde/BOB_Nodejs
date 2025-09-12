@@ -76,7 +76,7 @@ async function getMgmtToken() {
 router.post("/recruiter-register", async (req, res) => {
   const client = await pool.connect();
   try {
-    const { name, email, password: encryptedPassword, role } = req.body;
+    const { name, email, password: encryptedPassword, role, created_by } = req.body;
 
     if (!name || !email || !encryptedPassword || !role) {
       return res
@@ -120,8 +120,8 @@ router.post("/recruiter-register", async (req, res) => {
     // 2) Insert into Postgres
     await client.query("BEGIN");
     const insertSQL = `
-      INSERT INTO public.users (name, role, email, manager_id, user_password, oath_user_id)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO public.users (name, role, email, manager_id, user_password, oath_user_id, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING userid
     `;
     const { rows } = await client.query(insertSQL, [
@@ -130,7 +130,8 @@ router.post("/recruiter-register", async (req, res) => {
       email,
       "2",
       encryptedPassword, // store encrypted version
-      auth0UserId
+      auth0UserId,
+      created_by
     ]);
     await client.query("COMMIT");
 
