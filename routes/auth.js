@@ -63,6 +63,16 @@ function decryptPassword(encryptedPassword) {
   }
 }
 
+async function getMgmtToken() {
+  const tokenRes = await axios.post(`${AUTH0_DOMAIN}/oauth/token`, {
+    client_id: M2M_CLIENT_ID,
+    client_secret: M2M_CLIENT_SECRET,
+    audience: `${AUTH0_DOMAIN}/api/v2/`,
+    grant_type: "client_credentials",
+  });
+  return tokenRes.data.access_token;
+}
+
 router.post("/recruiter-register", async (req, res) => {
   const client = await pool.connect();
   try {
@@ -94,14 +104,24 @@ router.post("/recruiter-register", async (req, res) => {
           user_metadata: { name },
         }
       );
+      // 2) Get Management token
+      const mgmtToken = await getMgmtToken();
+
+      // 3) Lookup user by email
+      const userRes = await axios.get(
+        `${AUTH0_DOMAIN}/api/v2/users-by-email?email=${encodeURIComponent(email)}`,
+        { headers: { Authorization: `Bearer ${mgmtToken}` } }
+      );
+
+      auth0UserId = userRes.data[0]?.user_id || null; // this is your "sub"
       a0 = data; // <- assign the response data to a0
     }
-
+    // console.log("Auth0 subId response:", auth0UserId);
     // 2) Insert into Postgres
     await client.query("BEGIN");
     const insertSQL = `
-      INSERT INTO public.users (name, role, email, manager_id, user_password)
-      VALUES ($1, $2, $3, $4, $5)
+      INSERT INTO public.users (name, role, email, manager_id, user_password, oath_user_id)
+      VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING userid
     `;
     const { rows } = await client.query(insertSQL, [
@@ -110,6 +130,7 @@ router.post("/recruiter-register", async (req, res) => {
       email,
       "2",
       encryptedPassword, // store encrypted version
+      auth0UserId
     ]);
     await client.query("COMMIT");
 
