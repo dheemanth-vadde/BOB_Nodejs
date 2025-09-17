@@ -16,8 +16,7 @@ const getDetailsRoutes = require("./routes/getdetails");
 const resumeRoutes = require("./routes/resume");
 const offerTemplates = require("./routes/offerTemplates");
 const candidateDocs = require("./routes/candidateDoc"); 
-const singleupload = require("./routes/singleupload");
-const pathupload = require("./routes/pathupload");
+const resumeparse = require("./routes/reusmeparse");
 
 const {
   router: razorpayRouter,
@@ -80,9 +79,7 @@ app.use("/api/getdetails",getDetailsRoutes);
 app.use("/api/resume",resumeRoutes);
 app.use("/api/offer-templates", offerTemplates);
 app.use("/api/uploaddoc", candidateDocs);
-app.use("/api/singleupload",singleupload);
-app.use("/api/pathupload",pathupload);
-
+app.use("/api/parseresume",resumeparse);
 
 
 app.listen(process.env.PORT, () => {
